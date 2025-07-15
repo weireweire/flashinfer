@@ -141,12 +141,14 @@ def test_trtllm_batch_decode_fmha(
             batch_size, num_qo_heads, head_dim, dtype=torch.bfloat16, device=device
         )
         q, q_scale = to_float8(q)
-
+        # Reference implementation have functional issue or low precision with fp8, use bfloat16 and fake-quantization instead.
+        ref_q = q.bfloat16() * q_scale
     else:
         q = torch.randn(
             batch_size, num_qo_heads, head_dim, dtype=dtype_map[q_dtype], device=device
         )
         q_scale = 1.0
+        ref_q = q
 
     # Sequence lengths and block tables
     seq_lens = [torch.randint(1, MAX_SEQ_LEN, (1,)).item() for _ in range(batch_size)]
@@ -197,8 +199,11 @@ def test_trtllm_batch_decode_fmha(
         [k_cache, v_cache], dim=1
     )  # Shape: (num_blocks, 2, num_kv_heads, page_size, head_dim)
 
-    o_scale = 1  # torch.rand(1).item() * 0.5 + 0.5  # Scale range: 0.5 ~ 1.0
+    ref_kv_cache = torch.stack(
+        [k_cache.bfloat16() * k_scale, v_cache.bfloat16() * v_scale], dim=1
+    )
 
+    o_scale = torch.rand(1).item() * 0.5 + 0.5  # Scale range: 0.5 ~ 1.0
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8, device=device)
 
     output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
@@ -218,13 +223,11 @@ def test_trtllm_batch_decode_fmha(
         o_scale,
     )
 
-    # Reference implementation have functional issue or low precision with fp8, use half instead.
-    ref_q = q.half() if q_dtype == "fp8" else q
     if head_grp_size == 5:
         scale = float(1.0 / (head_dim**0.5))
         output_ref = reference_paged_attention(
             ref_q,
-            kv_cache,
+            ref_kv_cache,
             block_tables,
             seq_lens_tensor,
             page_size,
@@ -267,16 +270,18 @@ def test_trtllm_batch_decode_fmha(
             head_dim,
             page_size,
             pos_encoding_mode="NONE",
-            data_type=kv_compute_dtype,
+            data_type=ref_kv_cache.dtype,
             q_data_type=ref_q.dtype,
         )
 
-        output_ref = wrapper.run(ref_q, kv_cache)
+        output_ref = wrapper.run(ref_q, ref_kv_cache)
 
     rtol, atol = (1e-2, 5e-2) if q_dtype != "fp8" else (5e-2, 7e-2)
 
     # convert to float32 for fp8 is not supported by assert_close
-    torch.testing.assert_close(output.float(), output_ref.float(), rtol=rtol, atol=atol)
+    torch.testing.assert_close(
+        output.float() * o_scale, output_ref.float(), rtol=rtol, atol=atol
+    )
 
 
 @pytest.mark.parametrize(
