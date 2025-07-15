@@ -43,9 +43,6 @@ void trtllm_paged_attention_launcher(at::Tensor& out, at::Tensor& query,
   auto device = query.device();
   const auto stream = at::cuda::getCurrentCUDAStream(device.index());
 
-  TORCH_CHECK(q_scale == 1 && k_scale == 1 && v_scale == 1,
-              "only 1.0 is supported as the scale for q, k, and v for now.");
-
   uint32_t tokens_per_page = block_size;
 
   uint32_t num_k_heads = num_kv_heads;
@@ -142,9 +139,6 @@ void trtllm_paged_attention_launcher(at::Tensor& out, at::Tensor& query,
                       max_head_dim_kv * get_size_in_bytes(CACHE_T));
 
   runner_params.stream = stream;
-
-  runner_params.outputScale = 1.0;
-  runner_params.scaleSoftmaxLog2 = 1.0;
 
   fmha_runner.run(runner_params);
 }

@@ -114,8 +114,8 @@ def test_trtllm_batch_decode_fmha(
 ):
     if head_grp_size == 5 and kv_cache_dtype == "fp8":
         pytest.skip("No reference provided for head_grp_size=5 and fp8 kv_cache")
-    if kv_cache_dtype == "fp8" and q_dtype == "fp8":
-        pytest.skip("duplicated test to auto kvcache type.")
+    if kv_cache_dtype == "auto" and q_dtype == "fp8":
+        pytest.skip("duplicated test to fp8 kvcache type.")
 
     # Set up test parameters
     seed = 0
@@ -136,7 +136,17 @@ def test_trtllm_batch_decode_fmha(
         "fp8": torch.float8_e4m3fn,
     }
 
-    q = torch.randn(batch_size, num_qo_heads, head_dim).to(0).to(dtype_map[q_dtype])
+    if q_dtype == "fp8":
+        q = torch.randn(
+            batch_size, num_qo_heads, head_dim, dtype=torch.bfloat16, device=device
+        )
+        q, q_scale = to_float8(q)
+
+    else:
+        q = torch.randn(
+            batch_size, num_qo_heads, head_dim, dtype=dtype_map[q_dtype], device=device
+        )
+        q_scale = 1.0
 
     # Sequence lengths and block tables
     seq_lens = [torch.randint(1, MAX_SEQ_LEN, (1,)).item() for _ in range(batch_size)]
@@ -168,15 +178,26 @@ def test_trtllm_batch_decode_fmha(
         ]
         block_id += num_blocks_needed
 
-    # Create interleaved KV cache
-    # kv_cache_shape = (block_id, 2, num_kv_heads, page_size, head_dim)
-    # Allocate more than needed blocks, block_id is just enough, to mimick real-world cases
-    kv_cache_shape = (num_blocks, 2, num_kv_heads, page_size, head_dim)
-    kv_cache = torch.randn(size=kv_cache_shape).to(dtype_map[q_dtype]).to(device)
-    q_scale = k_scale = v_scale = o_scale = 1.0
+    # Create separate K and V caches
+    kv_dtype = dtype_map[q_dtype] if q_dtype != "fp8" else torch.bfloat16
+    k_cache = torch.randn(
+        num_blocks, num_kv_heads, page_size, head_dim, dtype=kv_dtype, device=device
+    )
+    v_cache = torch.randn(
+        num_blocks, num_kv_heads, page_size, head_dim, dtype=kv_dtype, device=device
+    )
+    # Convert K and V separately to fp8 if needed
+    if kv_cache_dtype.startswith("fp8"):
+        k_cache, k_scale = to_float8(k_cache)
+        v_cache, v_scale = to_float8(v_cache)
+    else:
+        k_scale = v_scale = 1.0
+    # Combine K and V into interleaved format for the API
+    kv_cache = torch.stack(
+        [k_cache, v_cache], dim=1
+    )  # Shape: (num_blocks, 2, num_kv_heads, page_size, head_dim)
 
-    if kv_cache_dtype.startswith("fp8") and q_dtype != "fp8":
-        kv_cache, _ = to_float8(kv_cache)
+    o_scale = 1  # torch.rand(1).item() * 0.5 + 0.5  # Scale range: 0.5 ~ 1.0
 
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8, device=device)
 
