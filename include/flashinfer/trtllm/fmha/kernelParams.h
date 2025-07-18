@@ -726,6 +726,7 @@ struct KernelParams {
     params.mScaleSoftmaxLog2 = options.scaleSoftmaxLog2;
     params.mStartTokenIdxSfO = options.mSfStartTokenIdx;
     params.mScaleSfKv = options.mScaleSfKv;
+    params.mScaleSfO = options.mScaleSfO;
     params.ptrSoftmaxStats = nullptr;
 
     return params;

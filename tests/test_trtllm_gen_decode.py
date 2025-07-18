@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
+from utils_fp4 import cast_from_fp4, recover_swizzled_scales, ref_nvfp4_quant
 
 import flashinfer
 
@@ -101,6 +102,7 @@ def reference_paged_attention(
 @pytest.mark.parametrize("page_size", [16, 32, 64])
 @pytest.mark.parametrize("num_kv_heads", [2, 4])
 @pytest.mark.parametrize("q_dtype", ["half", "bf16", "fp8"])
+@pytest.mark.parametrize("o_dtype", ["auto", "fp4"])
 @pytest.mark.parametrize("head_grp_size", [1, 5, 8])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_trtllm_batch_decode_fmha(
@@ -109,13 +111,16 @@ def test_trtllm_batch_decode_fmha(
     page_size,
     num_kv_heads,
     q_dtype,
+    o_dtype,
     head_grp_size,
     kv_cache_dtype,
 ):
     if head_grp_size == 5 and kv_cache_dtype == "fp8":
         pytest.skip("No reference provided for head_grp_size=5 and fp8 kv_cache")
     if kv_cache_dtype == "auto" and q_dtype == "fp8":
-        pytest.skip("duplicated test to fp8 kvcache type.")
+        pytest.skip("duplicated test to fp8 kvcache type")
+    if o_dtype == "fp4" and q_dtype != "fp8":
+        pytest.skip("fp4 output is only supported for fp8 query")
 
     # Set up test parameters
     seed = 0
@@ -180,14 +185,16 @@ def test_trtllm_batch_decode_fmha(
 
     # Output type is fp8 when q is fp8, set scale for it.
     o_scale = (
-        1.0 if q_dtype != "fp8" else torch.rand(1).item() * 0.5 + 0.5
+        torch.rand(1).item() * 0.5 + 0.5
+        if q_dtype != "fp8" and o_dtype == "auto"
+        else 1.0
     )  # Scale range: 0.5 ~ 1.0
     if kv_cache_dtype.startswith("fp8") and q_dtype != "fp8":
         kv_cache, _ = to_float8(kv_cache)
 
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8, device=device)
 
-    output = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+    output, out_scale_factor = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
         q,
         kv_cache,
         workspace_buffer,
@@ -200,6 +207,9 @@ def test_trtllm_batch_decode_fmha(
         kv_cache_dtype,
         q_scale * k_scale * sm_scale,  # bmm1_scale
         v_scale / o_scale,  # bmm2_scale
+        out_dtype=o_dtype,
+        o_sf_scale=1.0 if o_dtype == "fp4" else None,
+        o_sf_vec_size=16 if o_dtype == "fp4" else None,
     )
 
     # Reference implementation have functional issue or low precision with fp8, use half instead.
@@ -252,7 +262,26 @@ def test_trtllm_batch_decode_fmha(
 
         output_ref = wrapper.run(ref_q, kv_cache)
 
-    rtol, atol = (1e-2, 5e-2) if q_dtype != "fp8" else (5e-2, 7e-2)
+    if q_dtype == "fp8" and o_dtype == "auto":
+        rtol, atol = 5e-2, 7e-2
+    elif q_dtype == "fp8" and o_dtype == "fp4":
+        rtol, atol = 1e0, 5e-1
+    else:
+        rtol, atol = 1e-2, 5e-2
+
+    if o_dtype == "fp4":
+        output = cast_from_fp4(output)
+        output_ref, out_scale_factor_ref = ref_nvfp4_quant(output_ref, 1.0, 16)
+        out_scale_factor = recover_swizzled_scales(
+            out_scale_factor, output.shape[0], output.shape[1] * output.shape[2], 16
+        )
+        print(out_scale_factor.shape, out_scale_factor_ref.shape)
+        torch.testing.assert_close(
+            out_scale_factor.float().reshape(out_scale_factor_ref.shape),
+            out_scale_factor_ref.float(),
+            rtol=rtol,
+            atol=atol * 2,
+        )
 
     # convert to float32 for fp8 is not supported by assert_close
     torch.testing.assert_close(

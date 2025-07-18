@@ -26,13 +26,13 @@
 
 namespace flashinfer {
 template <typename T, Data_type CACHE_T>
-void trtllm_paged_attention_launcher(at::Tensor& out, at::Tensor& query,
-                                     at::Tensor& key_value_cache, at::Tensor& workspace_buffer,
-                                     int64_t num_q_heads, int64_t num_kv_heads,
-                                     at::Tensor& block_tables, at::Tensor& seq_lens,
-                                     int64_t block_size, int64_t max_seq_len,
+void trtllm_paged_attention_launcher(at::Tensor& out, at::Tensor& out_scale_factor,
+                                     at::Tensor& query, at::Tensor& key_value_cache,
+                                     at::Tensor& workspace_buffer, int64_t num_q_heads,
+                                     int64_t num_kv_heads, at::Tensor& block_tables,
+                                     at::Tensor& seq_lens, int64_t block_size, int64_t max_seq_len,
                                      const std::string kv_cache_dtype, double bmm1_scale,
-                                     double bmm2_scale) {
+                                     double bmm2_scale, double o_sf_scale, int64_t o_sf_vec_size) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   TORCH_CHECK(num_heads == static_cast<int>(num_q_heads),
@@ -66,8 +66,8 @@ void trtllm_paged_attention_launcher(at::Tensor& out, at::Tensor& query,
 
   bool use_multi_block = true;
   auto q_data_type = (kv_cache_dtype == "fp8_e4m3") ? DATA_TYPE_E4M3 : io_type;
-  auto output_dtype = io_type;
-  static auto fmha_runner = TllmGenFmhaRunner(q_data_type, CACHE_T, io_type);
+  auto output_dtype = out.dtype() == at::kByte ? DATA_TYPE_E2M1 : io_type;
+  static auto fmha_runner = TllmGenFmhaRunner(io_type, CACHE_T, output_dtype);
 
   TllmGenFmhaRunnerParams runner_params;
   memset(&runner_params, 0, sizeof(runner_params));
@@ -85,7 +85,10 @@ void trtllm_paged_attention_launcher(at::Tensor& out, at::Tensor& query,
   runner_params.kvPageIdxPtr = block_tables.data_ptr<KVCachePageIndex>();
   runner_params.mMaxNumPagesPerSeqKv = max_num_blocks_per_seq;
   runner_params.mNumTokensPerPage = tokens_per_page;
-
+  runner_params.oSfPtr = out_scale_factor.data_ptr();
+  runner_params.mScaleSfO = o_sf_scale;
+  TORCH_CHECK(o_sf_vec_size == 16 || o_sf_vec_size == -1,
+              "Only support o_sf_vec_size == 16 or -1(not used)");
   // num_kv_heads should be enough, but num_heads for safty at long seq len.
   size_t num_semaphores = batch_size * num_heads;
 
@@ -143,10 +146,11 @@ void trtllm_paged_attention_launcher(at::Tensor& out, at::Tensor& query,
   fmha_runner.run(runner_params);
 }
 
-#define CALL_GEN_LAUNCHER(T, CACHE_T_ENUM)                                                    \
-  trtllm_paged_attention_launcher<T, CACHE_T_ENUM>(                                           \
-      out, query, key_value_cache, workspace_buffer, num_q_heads, num_kv_heads, block_tables, \
-      seq_lens, block_size, max_seq_len, kv_cache_dtype, bmm1_scale, bmm2_scale);
+#define CALL_GEN_LAUNCHER(T, CACHE_T_ENUM)                                                        \
+  trtllm_paged_attention_launcher<T, CACHE_T_ENUM>(                                               \
+      out, out_scale_factor, query, key_value_cache, workspace_buffer, num_q_heads, num_kv_heads, \
+      block_tables, seq_lens, block_size, max_seq_len, kv_cache_dtype, bmm1_scale, bmm2_scale,    \
+      o_sf_scale, o_sf_vec_size);
 
 // The following macro is used to dispatch the conversion function based on
 // the data type of the key and value cache. The FN is a macro that calls a
@@ -178,11 +182,12 @@ void trtllm_paged_attention_launcher(at::Tensor& out, at::Tensor& query,
     }                                                                          \
   }
 
-void trtllm_paged_attention(at::Tensor& out, at::Tensor& query, at::Tensor& key_value_cache,
-                            at::Tensor& workspace_buffer, int64_t num_q_heads, int64_t num_kv_heads,
-                            at::Tensor& block_tables, at::Tensor& seq_lens, int64_t block_size,
-                            int64_t max_seq_len, const std::string kv_cache_dtype,
-                            double bmm1_scale, double bmm2_scale) {
+void trtllm_paged_attention(at::Tensor& out, at::Tensor& out_scale_factor, at::Tensor& query,
+                            at::Tensor& key_value_cache, at::Tensor& workspace_buffer,
+                            int64_t num_q_heads, int64_t num_kv_heads, at::Tensor& block_tables,
+                            at::Tensor& seq_lens, int64_t block_size, int64_t max_seq_len,
+                            const std::string kv_cache_dtype, double bmm1_scale, double bmm2_scale,
+                            double o_sf_scale, int64_t o_sf_vec_size) {
   DISPATCH_BY_KV_CACHE_ELEM_ENUM(query.dtype(), kv_cache_dtype, CALL_GEN_LAUNCHER);
 }
 

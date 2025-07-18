@@ -1711,16 +1711,54 @@ def trtllm_batch_decode_with_kv_cache(
     bmm1_scale: float,
     bmm2_scale: float,
     out: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+    out_dtype: str = "auto",
+    out_scale_factor: Optional[torch.Tensor] = None,
+    o_sf_scale: Optional[float] = None,
+    o_sf_vec_size: Optional[int] = None,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     run_func = get_trtllm_fmha_gen_module().trtllm_paged_attention
 
-    if out is None:
-        out = torch.empty_like(query)
-    else:
+    if out_dtype == "fp4":
+        assert query.dtype == torch.float8_e4m3fn
+        assert o_sf_scale is not None
+        assert o_sf_vec_size in [None, 16]
+        o_sf_vec_size = o_sf_vec_size or 16
+
+        fp4_out_shape = query.shape[:-1] + (math.ceil(query.shape[-1] / 2),)
+        if out is None:
+            out = torch.empty(fp4_out_shape, dtype=torch.uint8, device=query.device)
+
+        _check_shape_dtype_device(out, fp4_out_shape, torch.uint8, query.device, "out")
+
+        fp4_out_scale_shape = (
+            math.ceil(query.shape[0] / 128) * 128,
+            math.ceil(query.shape[1] * query.shape[2] / o_sf_vec_size / 4) * 4,
+        )
+        if out_scale_factor is None:
+            out_scale_factor = torch.empty(
+                fp4_out_scale_shape, dtype=torch.float8_e4m3fn, device=query.device
+            )
+
+        # Use uint8 as the container dtype to compliant with next fp4 gemm.
+        _check_shape_dtype_device(
+            out_scale_factor,
+            fp4_out_scale_shape,
+            torch.float8_e4m3fn,
+            query.device,
+            "out_scale_factor",
+        )
+    elif out_dtype == "auto":
+        assert out_scale_factor is None
+        assert o_sf_scale is None
+        assert o_sf_vec_size is None
+        out = out if out is not None else torch.empty_like(query)
         _check_shape_dtype_device(out, query.shape, query.dtype, query.device, "out")
+    else:
+        raise ValueError(f"Invalid out_dtype: {out_dtype}")
 
     run_func(
         out,
+        out_scale_factor if out_scale_factor is not None else torch.empty(0),
         query,
         kv_cache,
         workspace_buffer,
@@ -1733,8 +1771,10 @@ def trtllm_batch_decode_with_kv_cache(
         kv_cache_dtype,
         bmm1_scale,
         bmm2_scale,
+        o_sf_scale or -1.0,
+        o_sf_vec_size or -1,
     )
-    return out
+    return out, out_scale_factor
 
 
 def _check_trtllm_gen_mla_shape(
