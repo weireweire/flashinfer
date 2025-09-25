@@ -470,6 +470,8 @@ std::vector<int64_t> Runner::getValidConfigIndices(int32_t topK, int32_t hiddenS
                                          numLocalExperts, numTokens) &&
         mGemm2.isValidConfigIndex(config.gemm2Config, topK, hiddenSize, intermediateSize,
                                   numLocalExperts, numTokens)) {
+      std::cout << "Config index: " << i << ", gemm1Config: " << config.gemm1Config
+                << ", gemm2Config: " << config.gemm2Config << std::endl;
       validIndices.push_back(i);
     }
   }

@@ -441,10 +441,10 @@ class AutoTuner:
             # Record the cache miss config.
             # Expect no cache miss in inference. Thus, any cache miss should be recorded.
             if not is_cache_hit:
-                logger.debug(
+                logger.warning(
                     f"[AutoTunner]: Using fallback tactic for {custom_op} with input shapes {input_shapes}"
                 )
-                logger.debug(
+                logger.warning(
                     f"[AutoTunner]: Generated key{AutoTuner._get_cache_key(custom_op, runners[0], input_shapes, tuning_config)}"
                 )
             return runner, tactic
@@ -453,12 +453,23 @@ class AutoTuner:
         assert all([isinstance(r, TunableRunner) for r in runners]), (
             "All Given runners must be subclass of TunableRunner"
         )
+        print(
+            "-------tuning config-------",
+            tuning_config,
+            "inputs",
+            inputs,
+            "runners",
+            runners,
+            "custom_op",
+            custom_op,
+        )
 
         profiles = self._generate_optimization_profiles(tuning_config, inputs)
         # Record the total configs to try
         self.stats.tuned_op_total_configs[custom_op] = len(profiles)
 
         for p in profiles:
+            print("-------profile-------", p)
             tensors = self._prepare_input_tensors(p, inputs)
             is_cache_hit, runner_id, tactic, _ = self.search_cache(
                 custom_op, runners, p.get_opt_shapes(), tuning_config
@@ -499,9 +510,16 @@ class AutoTuner:
                             # Set time_measured to inf to notify the failure of the tactic. This can happen when `get_valid_tactics` mistakenly return wrong tactics
                             # or some runtime error occurs during profiling.
                             time_measured = float("inf")
+                        print(
+                            f"runner: {r_id} tactic: {tac} time_measured: {time_measured}"
+                        )
+
                         if time_measured < min_time:
                             min_time = time_measured
                             runner_id, tactic = r_id, tac
+                    print(
+                        "min_time", min_time, "runner_id", runner_id, "tactic", tactic
+                    )
                 if runner_id is not None:
                     # At least one valid (runner, tactic) pair is found
                     cache_key = AutoTuner._get_cache_key(

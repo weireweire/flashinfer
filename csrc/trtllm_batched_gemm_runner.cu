@@ -437,9 +437,10 @@ bool TrtllmGenBatchedGemmRunner::isValidConfigIndex(int32_t configIndex, int32_t
   gemmData.mProblemDimensions.mMaxNumCtasInTokenDim = maxNumCtasInBatchDim;
 
   auto const& config = configs[configIndex];
+  bool isValid = bmm.isValidConfig(config, gemmData);
+  std::cout << configIndex << " " << config.mFunctionName << " " << isValid << std::endl;
 
-  return bmm.isValidConfig(config, gemmData);
+  return isValid;
 }
-
 }  // namespace kernels
 }  // namespace tensorrt_llm
